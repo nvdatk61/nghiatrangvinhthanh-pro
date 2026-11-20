@@ -1,10 +1,12 @@
-// Local multiplayer server for the Vinh Thanh martyrs' cemetery 3D memorial.
-// No dependencies besides node: static files, a tiny JSON API and a WebSocket room.
+// Local Node server for the Vinh Thanh martyrs' cemetery 3D memorial.
+// No dependencies besides node: static files, a tiny JSON API and a WebSocket room (see room.mjs).
+// Production runs on Cloudflare instead (worker/worker.mjs) with the same room logic.
 import http from "node:http";
 import fs from "node:fs";
 import fsp from "node:fs/promises";
 import path from "node:path";
 import crypto from "node:crypto";
+import { createRoom, CAPACITY } from "./room.mjs";
 
 const ROOT = path.resolve(import.meta.dirname, "..");
 const PUBLIC = path.join(ROOT, "public");
@@ -12,13 +14,6 @@ const DATA = path.resolve(ROOT, process.env.DATA_DIR || "data");
 const STATE_FILE = path.join(DATA, "state.json");
 const PORT = Number(process.env.PORT || 3100);
 const HOST = process.env.HOST || "127.0.0.1";
-const CAPACITY = 50;
-const ACTIVE_MS = 24 * 3600 * 1000; // an offering stays visible for 24h
-const COOLDOWN_MS = 30 * 1000; // same player, same grave, same kind
-const KINDS = ["incense", "flower", "candle"];
-const KIND_LABEL = { incense: "thắp hương", flower: "đặt hoa", candle: "thắp nến" };
-const NAME_RE = /^[\p{L}\p{N} ._\-]{2,24}$/u;
-const COLORS = ["#c0392b", "#2e86de", "#27ae60", "#8e44ad", "#d35400", "#16a085", "#b8860b", "#5d6d7e"];
 
 const MIME = {
   ".html": "text/html; charset=utf-8", ".js": "text/javascript; charset=utf-8", ".mjs": "text/javascript; charset=utf-8",
@@ -27,115 +22,31 @@ const MIME = {
 };
 const STATIC_ALIAS = { "/vendor/three.module.js": path.join(ROOT, "node_modules/three/build/three.module.js") };
 
-// ---------- data ----------
+// ---------- room + persistence ----------
 const graves = JSON.parse(fs.readFileSync(path.join(DATA, "graves.json"), "utf8"));
-const graveById = new Map(graves.map((g) => [g.id, g]));
-const MONUMENT_ID = "monument";
+let saved = {};
+try { saved = JSON.parse(fs.readFileSync(STATE_FILE, "utf8")); } catch {}
 
-/** memorial[id] = { events: [{kind, at}], total: {incense, flower, candle} } */
-let memorial = {};
-let feed = []; // recent offerings, newest last
-try {
-  const saved = JSON.parse(fs.readFileSync(STATE_FILE, "utf8"));
-  memorial = saved.memorial || {};
-  feed = saved.feed || [];
-} catch {}
-
+let pendingState = null;
 let saveTimer = null;
-function scheduleSave() {
+function save({ memorial, feed }) {
+  pendingState = { memorial, feed };
   if (saveTimer) return;
   saveTimer = setTimeout(async () => {
     saveTimer = null;
     const tmp = STATE_FILE + ".tmp";
-    await fsp.writeFile(tmp, JSON.stringify({ memorial, feed }));
+    await fsp.writeFile(tmp, JSON.stringify(pendingState));
     await fsp.rename(tmp, STATE_FILE);
   }, 1000);
 }
-
-function graveState(id, now = Date.now()) {
-  const m = memorial[id];
-  const active = { incense: 0, flower: 0, candle: 0 };
-  if (!m) return { id, active, total: { ...active } };
-  m.events = m.events.filter((e) => now - e.at < ACTIVE_MS);
-  for (const e of m.events) active[e.kind]++;
-  return { id, active, total: { ...m.total } };
-}
-const allStates = () => {
-  const now = Date.now();
-  return Object.keys(memorial).map((id) => graveState(id, now));
-};
-
-// ---------- room ----------
-const sessions = new Map(); // sid -> {name, color}
-const players = new Map(); // id -> {id, name, color, x, z, yaw, moving}
-const sockets = new Map(); // id -> ws
-const messages = [];
-const cooldowns = new Map(); // `${sid}|${grave}|${kind}` -> ts
-let nextId = 1;
-let dirty = false;
-
-const SPAWN = { x: 0, z: 44, yaw: Math.PI };
-const send = (ws, msg) => ws.sendText(JSON.stringify(msg));
-const broadcast = (msg, except) => {
-  const s = JSON.stringify(msg);
-  for (const [id, ws] of sockets) if (id !== except) ws.sendText(s);
-};
-setInterval(() => {
-  if (!dirty) return;
-  dirty = false;
-  broadcast({ t: "players", players: [...players.values()] });
-}, 100);
-
-const num = (v, lo, hi) => (typeof v === "number" && Number.isFinite(v) ? Math.min(hi, Math.max(lo, v)) : null);
-
-function handle(id, sid, msg) {
-  const p = players.get(id);
-  const ws = sockets.get(id);
-  if (!p || !ws || !msg || typeof msg !== "object") return;
-  switch (msg.t) {
-    case "ping":
-      return send(ws, { t: "pong", at: Date.now() });
-    case "move": {
-      const x = num(msg.x, -60, 60), z = num(msg.z, -60, 60), yaw = num(msg.yaw, -100, 100);
-      if (x === null || z === null || yaw === null) return;
-      Object.assign(p, { x, z, yaw, moving: !!msg.moving });
-      dirty = true;
-      return;
-    }
-    case "chat": {
-      const text = String(msg.text || "").replace(/\s+/g, " ").trim().slice(0, 200);
-      if (!text) return;
-      const m = { id: crypto.randomUUID(), playerId: id, name: p.name, color: p.color, text, at: Date.now() };
-      messages.push(m);
-      if (messages.length > 60) messages.shift();
-      return broadcast({ t: "chat", message: m });
-    }
-    case "offer": {
-      const graveId = String(msg.graveId || "");
-      const kind = String(msg.kind || "");
-      if (!KINDS.includes(kind)) return send(ws, { t: "error", message: "Lễ vật không hợp lệ." });
-      if (graveId !== MONUMENT_ID && !graveById.has(graveId)) return send(ws, { t: "error", message: "Không tìm thấy phần mộ." });
-      const key = `${sid}|${graveId}|${kind}`;
-      const now = Date.now();
-      const last = cooldowns.get(key) || 0;
-      if (now - last < COOLDOWN_MS) {
-        const wait = Math.ceil((COOLDOWN_MS - (now - last)) / 1000);
-        return send(ws, { t: "error", message: `Bạn vừa ${KIND_LABEL[kind]} ở đây, xin chờ ${wait} giây.` });
-      }
-      cooldowns.set(key, now);
-      const m = (memorial[graveId] ||= { events: [], total: { incense: 0, flower: 0, candle: 0 } });
-      m.events.push({ kind, at: now });
-      m.total[kind] = (m.total[kind] || 0) + 1;
-      const target = graveId === MONUMENT_ID ? "Đài Tổ quốc ghi công" : `liệt sĩ ${graveById.get(graveId).name}`;
-      const entry = { name: p.name, kind, graveId, target, at: now };
-      feed.push(entry);
-      if (feed.length > 100) feed.shift();
-      scheduleSave();
-      broadcast({ t: "memorial", state: graveState(graveId, now), entry });
-      return;
-    }
-  }
-}
+const sessions = new Map();
+const room = createRoom({
+  graves,
+  saved,
+  save,
+  getSession: async (sid) => sessions.get(sid),
+  putSession: (sid, profile) => { sessions.set(sid, profile); },
+});
 
 // ---------- minimal WebSocket (RFC 6455, text frames only) ----------
 function acceptWebSocket(req, socket, onOpen) {
@@ -158,7 +69,7 @@ function acceptWebSocket(req, socket, onOpen) {
         : (() => { const b = Buffer.alloc(10); b[0] = 0x80 | opcode; b[1] = 127; b.writeBigUInt64BE(BigInt(len), 2); return b; })();
       socket.write(Buffer.concat([head, payload]));
     },
-    sendText(s) { this.sendFrame(0x1, Buffer.from(s)); },
+    send(s) { this.sendFrame(0x1, Buffer.from(s)); },
     close(code = 1000, reason = "") {
       if (this.closed) return;
       const r = Buffer.from(reason);
@@ -207,28 +118,12 @@ function acceptWebSocket(req, socket, onOpen) {
 const parseCookies = (h = "") =>
   Object.fromEntries(h.split(";").map((c) => c.trim().split("=")).filter((x) => x[0]).map(([k, ...v]) => [k, decodeURIComponent(v.join("="))]));
 
-function onWsConnect(req, ws) {
-  const sid = parseCookies(req.headers.cookie).vt_sid;
-  const profile = sid && sessions.get(sid);
-  if (!profile) return ws.close(4004, "NO_SESSION");
-  if (players.size >= CAPACITY) return ws.close(4003, "FULL");
-  // one connection per session: replace the old one
-  for (const [pid, p] of players) {
-    if (p.sid === sid) { sockets.get(pid)?.close(4001, "REPLACED"); }
-  }
-  const id = `p${nextId++}`;
-  const player = { id, sid, name: profile.name, color: profile.color, ...SPAWN, moving: false };
-  players.set(id, player);
-  sockets.set(id, ws);
-  dirty = true;
-  send(ws, { t: "welcome", id, players: [...players.values()], messages, memorial: allStates(), feed: feed.slice(-20) });
-  ws.onmessage = (data) => { try { handle(id, sid, JSON.parse(data)); } catch {} };
-  ws.onclose = () => {
-    players.delete(id);
-    sockets.delete(id);
-    dirty = true;
-    broadcast({ t: "leave", id });
-  };
+async function onWsConnect(req, ws) {
+  const handlers = await room.connect(parseCookies(req.headers.cookie).vt_sid, ws);
+  if (!handlers) return;
+  ws.onmessage = handlers.onMessage;
+  ws.onclose = handlers.onClose;
+  if (ws.closed) handlers.onClose();
 }
 
 // ---------- HTTP ----------
@@ -264,17 +159,14 @@ const server = http.createServer(async (req, res) => {
   const p = url.pathname;
   try {
     if (p === "/api/graves" && req.method === "GET") return json(res, 200, { graves });
-    if (p === "/api/health") return json(res, 200, { ok: true, online: players.size, capacity: CAPACITY });
-    if (p === "/api/memorial" && req.method === "GET") return json(res, 200, { states: allStates(), feed: feed.slice(-20) });
+    if (p === "/api/health") return json(res, 200, { ok: true, online: room.online(), capacity: CAPACITY });
+    if (p === "/api/memorial" && req.method === "GET") return json(res, 200, room.memorialSnapshot());
     if (p === "/api/session" && req.method === "POST") {
       let body = {};
       try { body = JSON.parse(await readBody(req)); } catch {}
-      const name = String(body.name || "").replace(/\s+/g, " ").trim();
-      if (!NAME_RE.test(name)) return json(res, 400, { error: "Tên cần 2–24 ký tự (chữ, số, khoảng trắng)." });
-      const sid = crypto.randomBytes(18).toString("base64url");
-      const color = COLORS[crypto.randomInt(COLORS.length)];
-      sessions.set(sid, { name, color });
-      return json(res, 200, { ok: true, name, color }, { "set-cookie": `vt_sid=${sid}; Path=/; HttpOnly; SameSite=Lax` });
+      const r = await room.createSession(body.name);
+      if (!r.ok) return json(res, 400, { error: r.error });
+      return json(res, 200, { ok: true, name: r.name, color: r.color }, { "set-cookie": `vt_sid=${r.sid}; Path=/; HttpOnly; SameSite=Lax` });
     }
     if (p.startsWith("/api/")) return json(res, 404, { error: "not found" });
     if (req.method !== "GET" && req.method !== "HEAD") return json(res, 405, { error: "method not allowed" });

@@ -20,6 +20,22 @@ npm test               # smoke: tự bật server ở port ngẫu nhiên với t
 npm run e2e            # cần server đang chạy ở 3100; Chrome headless vào, đi, dâng lễ, chat, chụp ảnh vào e2e-out/
 ```
 
+## Deploy lên Cloudflare (Workers + Durable Objects)
+
+Bản production chạy trên Cloudflare Workers:
+- `worker/worker.mjs` phục vụ file tĩnh trong `dist/`, do `npm run build` tạo từ `public/` cộng thêm three.js.
+- `/api/*` và `/ws` được chuyển vào một Durable Object tên `MemorialRoom`. Nó dùng chung logic phòng `server/room.mjs` với server Node.
+- Lễ vật, nhật ký và phiên người dùng được lưu trong storage của Durable Object, nên restart hay deploy lại cũng không mất.
+
+```bash
+npm run cf:dev                          # chạy Worker local ở http://127.0.0.1:8787 (giả lập Durable Object, dữ liệu trong .wrangler/)
+node tools/smoke.mjs http://127.0.0.1:8787
+```
+
+Deploy dùng **Cloudflare Workers Builds**: kết nối repo GitHub trong dashboard Cloudflare. Mỗi lần push lên `main`,
+Cloudflare tự chạy `npx wrangler deploy` theo `wrangler.jsonc`. Không deploy tay từ máy cá nhân.
+Lưu ý: build cần có `data/graves.json`.
+
 ## Có gì trong cảnh
 
 - Cổng tam quan có câu đối "Đời đời nhớ ơn các anh hùng liệt sĩ", tường bao, hàng cây.
@@ -34,7 +50,9 @@ npm run e2e            # cần server đang chạy ở 3100; Chrome headless và
 
 | Đường dẫn | Nội dung |
 | --- | --- |
-| `server/server.mjs` | Server Node không dependency: file tĩnh, `/api/graves`, `/api/memorial`, `/api/session`, WebSocket `/ws` |
+| `server/room.mjs` | Logic phòng dùng chung: người chơi, chat, lễ vật, phiên |
+| `server/server.mjs` | Server Node chạy local, không dependency: file tĩnh, `/api/graves`, `/api/memorial`, `/api/session`, WebSocket `/ws` |
+| `worker/worker.mjs`, `wrangler.jsonc` | Bản chạy trên Cloudflare (Worker + Durable Object `MemorialRoom`) |
 | `public/` | `index.html`, `style.css`, `app.js` (toàn bộ cảnh 3D và UI), âm thanh |
 | `data/graves.json` | Sinh ra từ `import-data`; **không commit** |
 | `data/state.json` | Lễ vật và nhật ký dâng lễ, server tự ghi; **không commit** |
