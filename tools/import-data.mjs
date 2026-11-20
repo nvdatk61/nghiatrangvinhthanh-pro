@@ -2,6 +2,7 @@
 // Usage: node tools/import-data.mjs [path/to/cemetery-data.ts]
 import fs from "node:fs";
 import path from "node:path";
+import { gravesToSql } from "../server/store.mjs";
 
 const ROOT = path.resolve(import.meta.dirname, "..");
 const src = process.argv[2] || path.resolve(ROOT, "../nghiatrangvinhthanh/lib/cemetery-data.ts");
@@ -21,4 +22,6 @@ if (ids.size !== graves.length) throw new Error("duplicate grave ids");
 
 fs.mkdirSync(path.join(ROOT, "data"), { recursive: true });
 fs.writeFileSync(path.join(ROOT, "data/graves.json"), JSON.stringify(graves, null, 1) + "\n");
-console.log(`imported ${graves.length} graves from ${src}`);
+// SQL for Cloudflare D1: npx wrangler d1 execute vinhthanh-3d --remote --file=data/graves.sql
+fs.writeFileSync(path.join(ROOT, "data/graves.sql"), gravesToSql(graves));
+console.log(`imported ${graves.length} graves from ${src} → data/graves.json, data/graves.sql`);

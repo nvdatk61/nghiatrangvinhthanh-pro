@@ -3,6 +3,8 @@ node_modules/
 e2e-out/
 # grave records and offering state are generated / runtime data; keep them out of git
 data/*.json
+data/*.sql
+data/*.db*
 data/*.tmp
 dist/
 .wrangler/

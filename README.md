@@ -8,7 +8,7 @@ Viết mới bằng Three.js, không dùng lại code hay hình ảnh của tran
 ```bash
 PATH=~/.nvm/versions/node/v24.22.3/bin:$PATH   # Node >= 22
 npm install            # chỉ cài three
-npm run import-data    # đọc ../nghiatrangvinhthanh/lib/cemetery-data.ts → data/graves.json
+npm run import-data    # đọc ../nghiatrangvinhthanh/lib/cemetery-data.ts → data/graves.json + data/graves.sql
 npm start              # http://127.0.0.1:3100  (PORT=..., HOST=0.0.0.0 để máy khác trong LAN vào)
 npm run open           # mở bằng Chrome profile riêng có GPU (Chrome chính của máy này rơi về llvmpipe)
 ```
@@ -24,17 +24,37 @@ npm run e2e            # cần server đang chạy ở 3100; Chrome headless và
 
 Bản production chạy trên Cloudflare Workers:
 - `worker/worker.mjs` phục vụ file tĩnh trong `dist/`, do `npm run build` tạo từ `public/` cộng thêm three.js.
-- `/api/*` và `/ws` được chuyển vào một Durable Object tên `MemorialRoom`. Nó dùng chung logic phòng `server/room.mjs` với server Node.
-- Lễ vật, nhật ký và phiên người dùng được lưu trong storage của Durable Object, nên restart hay deploy lại cũng không mất.
+- `/api/*` và `/ws` được chuyển vào một Durable Object tên `MemorialRoom`. Nó dùng chung logic phòng `server/room.mjs` với server Node. Durable Object chỉ giữ phần realtime và phiên người dùng.
+- **Dữ liệu bền nằm trong D1**: bảng `graves` và `offerings`, cấu trúc xem `migrations/`. Repo không chứa dữ liệu mộ.
+- Bản Node local dùng cùng cấu trúc bảng đó, lưu bằng `node:sqlite` vào file `data/local.db`.
+
+Thiết lập lần đầu, do chủ tài khoản Cloudflare tự chạy:
 
 ```bash
-npm run cf:dev                          # chạy Worker local ở http://127.0.0.1:8787 (giả lập Durable Object, dữ liệu trong .wrangler/)
-node tools/smoke.mjs http://127.0.0.1:8787
+npx wrangler login
+npx wrangler d1 create vinhthanh-3d                       # dán database_id in ra vào wrangler.jsonc
+npx wrangler d1 migrations apply vinhthanh-3d --remote    # tạo bảng
+npm run import-data                                       # tạo data/graves.sql từ app nghiatrangvinhthanh
+npx wrangler d1 execute vinhthanh-3d --remote --file=data/graves.sql
 ```
 
-Deploy dùng **Cloudflare Workers Builds**: kết nối repo GitHub trong dashboard Cloudflare. Mỗi lần push lên `main`,
-Cloudflare tự chạy `npx wrangler deploy` theo `wrangler.jsonc`. Không deploy tay từ máy cá nhân.
-Lưu ý: build cần có `data/graves.json`.
+Sau đó vào dashboard Cloudflare, chọn **Workers & Pages → Create → Import a repository** và chọn repo này (Workers Builds).
+Mỗi lần merge vào `main`, Cloudflare tự chạy `npx wrangler deploy`.
+
+Sửa dữ liệu mộ: sửa trong app gốc, chạy lại `npm run import-data` rồi `d1 execute --file=data/graves.sql`.
+Lệnh này upsert nên không cần deploy lại. Sau khi sửa, Durable Object chỉ đọc lại danh sách mộ khi nó khởi động lại,
+mà việc này sẽ xảy ra lúc không còn ai online.
+
+Sao lưu: `npx wrangler d1 export vinhthanh-3d --remote --output=backup.sql`.
+
+Chạy thử Worker trên máy (D1 và Durable Object đều giả lập trong `.wrangler/`):
+
+```bash
+npx wrangler d1 migrations apply vinhthanh-3d --local
+npx wrangler d1 execute vinhthanh-3d --local --file=data/graves.sql
+npm run cf:dev                                  # http://127.0.0.1:8787
+node tools/smoke.mjs http://127.0.0.1:8787
+```
 
 ## Có gì trong cảnh
 
@@ -54,8 +74,10 @@ Lưu ý: build cần có `data/graves.json`.
 | `server/server.mjs` | Server Node chạy local, không dependency: file tĩnh, `/api/graves`, `/api/memorial`, `/api/session`, WebSocket `/ws` |
 | `worker/worker.mjs`, `wrangler.jsonc` | Bản chạy trên Cloudflare (Worker + Durable Object `MemorialRoom`) |
 | `public/` | `index.html`, `style.css`, `app.js` (toàn bộ cảnh 3D và UI), âm thanh |
-| `data/graves.json` | Sinh ra từ `import-data`; **không commit** |
-| `data/state.json` | Lễ vật và nhật ký dâng lễ, server tự ghi; **không commit** |
+| `migrations/` | Cấu trúc bảng SQLite, dùng chung cho D1 và bản local |
+| `server/store.mjs` | Đọc và ghi DB (mộ, lễ vật), dùng chung cho D1 và `node:sqlite` |
+| `data/graves.json`, `data/graves.sql` | Sinh ra từ `import-data`; **không commit** |
+| `data/local.db` | SQLite của bản Node local (lễ vật, nhật ký); **không commit** |
 | `tools/` | `import-data.mjs`, `smoke.mjs`, `e2e.mjs`, `open-chrome.sh` |
 
 ## Giao thức WebSocket (JSON, trường `t`)
