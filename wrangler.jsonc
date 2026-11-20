@@ -13,7 +13,7 @@
       "binding": "DB",
       "database_name": "vinhthanh-3d",
       // from `npx wrangler d1 create vinhthanh-3d` (an identifier, not a secret)
-      "database_id": "00000000-0000-0000-0000-000000000000",
+      "database_id": "19a909c7-c6a3-427f-bf4a-40a9fb593bdc",
       "migrations_dir": "migrations"
     }
   ],
