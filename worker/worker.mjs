@@ -2,7 +2,13 @@
 // Room logic is shared with the local Node server (server/room.mjs).
 import { DurableObject } from "cloudflare:workers";
 import { createRoom, CAPACITY } from "../server/room.mjs";
-import graves from "../data/graves.json";
+import { loadGraves, loadMemorial, insertOffering } from "../server/store.mjs";
+
+// D1 adapter matching store.mjs
+const d1 = (DB) => ({
+  all: async (sql, ...params) => (await DB.prepare(sql).bind(...params).all()).results,
+  run: async (sql, ...params) => { await DB.prepare(sql).bind(...params).run(); },
+});
 
 const json = (data, status = 200, headers = {}) =>
   new Response(JSON.stringify(data), { status, headers: { "content-type": "application/json; charset=utf-8", "cache-control": "no-store", ...headers } });
@@ -13,19 +19,16 @@ const parseCookies = (h = "") =>
 export class MemorialRoom extends DurableObject {
   constructor(ctx, env) {
     super(ctx, env);
+    // Durable data (graves, offerings) lives in D1; this object only keeps the realtime room
+    // and visitor sessions (in its own storage).
     ctx.blockConcurrencyWhile(async () => {
-      const memorial = Object.fromEntries(
-        [...(await ctx.storage.list({ prefix: "m:" }))].map(([k, v]) => [k.slice(2), v]),
-      );
-      const feed = (await ctx.storage.get("feed")) || [];
+      const db = d1(env.DB);
+      const graves = await loadGraves(db);
+      this.graves = graves;
       this.room = createRoom({
         graves,
-        saved: { memorial, feed },
-        save: ({ memorial, feed, changed }) => {
-          const entries = { feed };
-          if (changed) entries[`m:${changed}`] = memorial[changed];
-          ctx.storage.put(entries);
-        },
+        saved: await loadMemorial(db, graves),
+        onOffer: (o) => insertOffering(db, o),
         getSession: (sid) => ctx.storage.get(`s:${sid}`),
         putSession: (sid, profile) => ctx.storage.put(`s:${sid}`, profile),
       });
@@ -36,6 +39,8 @@ export class MemorialRoom extends DurableObject {
     const url = new URL(request.url);
     const room = this.room;
     switch (url.pathname) {
+      case "/api/graves":
+        return json({ graves: this.graves }, 200, { "cache-control": "public, max-age=60" });
       case "/api/health":
         return json({ ok: true, online: room.online(), capacity: CAPACITY });
       case "/api/memorial":
@@ -75,7 +80,6 @@ export class MemorialRoom extends DurableObject {
 export default {
   async fetch(request, env) {
     const { pathname } = new URL(request.url);
-    if (pathname === "/api/graves") return json({ graves }, 200, { "cache-control": "public, max-age=300" });
     if (pathname.startsWith("/api/") || pathname === "/ws") {
       return env.ROOM.get(env.ROOM.idFromName("main")).fetch(request);
     }

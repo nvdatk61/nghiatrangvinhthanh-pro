@@ -112,8 +112,11 @@ try {
 
   if (tmp) {
     await sleep(1300);
-    const saved = JSON.parse(fs.readFileSync(path.join(tmp, "state.json"), "utf8"));
-    check("state persisted to disk", saved.memorial[graveId]?.total.incense === 1 && saved.feed.length === 2);
+    const { DatabaseSync } = await import("node:sqlite");
+    const db = new DatabaseSync(path.join(tmp, "local.db"), { readOnly: true });
+    const rows = db.prepare("SELECT grave_id, kind FROM offerings ORDER BY id").all();
+    db.close();
+    check("offerings persisted to sqlite", rows.length === 2 && rows[0].grave_id === graveId && rows[0].kind === "incense", JSON.stringify(rows));
   }
   const api = await (await fetch(BASE + "/api/memorial")).json();
   check("memorial api", api.states.some((s) => s.id === graveId));

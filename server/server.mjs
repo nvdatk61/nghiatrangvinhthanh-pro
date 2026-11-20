@@ -6,12 +6,14 @@ import fs from "node:fs";
 import fsp from "node:fs/promises";
 import path from "node:path";
 import crypto from "node:crypto";
+import { DatabaseSync } from "node:sqlite";
 import { createRoom, CAPACITY } from "./room.mjs";
+import { loadGraves, loadMemorial, insertOffering, gravesToSql } from "./store.mjs";
 
 const ROOT = path.resolve(import.meta.dirname, "..");
 const PUBLIC = path.join(ROOT, "public");
 const DATA = path.resolve(ROOT, process.env.DATA_DIR || "data");
-const STATE_FILE = path.join(DATA, "state.json");
+const DB_FILE = path.join(DATA, "local.db");
 const PORT = Number(process.env.PORT || 3100);
 const HOST = process.env.HOST || "127.0.0.1";
 
@@ -22,28 +24,27 @@ const MIME = {
 };
 const STATIC_ALIAS = { "/vendor/three.module.js": path.join(ROOT, "node_modules/three/build/three.module.js") };
 
-// ---------- room + persistence ----------
-const graves = JSON.parse(fs.readFileSync(path.join(DATA, "graves.json"), "utf8"));
-let saved = {};
-try { saved = JSON.parse(fs.readFileSync(STATE_FILE, "utf8")); } catch {}
-
-let pendingState = null;
-let saveTimer = null;
-function save({ memorial, feed }) {
-  pendingState = { memorial, feed };
-  if (saveTimer) return;
-  saveTimer = setTimeout(async () => {
-    saveTimer = null;
-    const tmp = STATE_FILE + ".tmp";
-    await fsp.writeFile(tmp, JSON.stringify(pendingState));
-    await fsp.rename(tmp, STATE_FILE);
-  }, 1000);
+// ---------- database (same schema as Cloudflare D1) + room ----------
+fs.mkdirSync(DATA, { recursive: true });
+const sqlite = new DatabaseSync(DB_FILE);
+for (const f of fs.readdirSync(path.join(ROOT, "migrations")).filter((f) => f.endsWith(".sql")).sort()) {
+  sqlite.exec(fs.readFileSync(path.join(ROOT, "migrations", f), "utf8"));
 }
+const db = {
+  all: async (sql, ...params) => sqlite.prepare(sql).all(...params),
+  run: async (sql, ...params) => { sqlite.prepare(sql).run(...params); },
+};
+// data/graves.json (from `npm run import-data`) is upserted on start so the local DB follows the source app
+const gravesJson = path.join(DATA, "graves.json");
+if (fs.existsSync(gravesJson)) sqlite.exec(gravesToSql(JSON.parse(fs.readFileSync(gravesJson, "utf8"))));
+
+const graves = await loadGraves(db);
+const saved = await loadMemorial(db, graves);
 const sessions = new Map();
 const room = createRoom({
   graves,
   saved,
-  save,
+  onOffer: (o) => insertOffering(db, o),
   getSession: async (sid) => sessions.get(sid),
   putSession: (sid, profile) => { sessions.set(sid, profile); },
 });

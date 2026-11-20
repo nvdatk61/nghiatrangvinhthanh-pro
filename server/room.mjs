@@ -1,15 +1,16 @@
 // Room logic shared by the local Node server and the Cloudflare Durable Object.
 // Runtime-agnostic: no node:* imports. Storage and sockets are injected.
 
+import { ACTIVE_MS, MONUMENT_ID, offeringTarget } from "./store.mjs";
+
 export const CAPACITY = 50;
-const ACTIVE_MS = 24 * 3600 * 1000; // an offering stays visible for 24h
 const COOLDOWN_MS = 30 * 1000; // same session, same grave, same kind
 const KINDS = ["incense", "flower", "candle"];
 const KIND_LABEL = { incense: "thắp hương", flower: "đặt hoa", candle: "thắp nến" };
 const NAME_RE = /^[\p{L}\p{N} ._\-]{2,24}$/u;
 const COLORS = ["#c0392b", "#2e86de", "#27ae60", "#8e44ad", "#d35400", "#16a085", "#b8860b", "#5d6d7e"];
 const SPAWN = { x: 0, z: 44, yaw: Math.PI };
-export const MONUMENT_ID = "monument";
+export { MONUMENT_ID };
 
 const num = (v, lo, hi) => (typeof v === "number" && Number.isFinite(v) ? Math.min(hi, Math.max(lo, v)) : null);
 const randomId = (bytes = 18) => {
@@ -20,12 +21,12 @@ const randomId = (bytes = 18) => {
 /**
  * @param {object} opts
  * @param {Array} opts.graves
- * @param {{memorial?: object, feed?: Array}} opts.saved  previously persisted state
- * @param {(state: {memorial: object, feed: Array}) => void} opts.save  persist (may be async, fire-and-forget)
+ * @param {{memorial?: object, feed?: Array}} opts.saved  state rebuilt from the database (store.loadMemorial)
+ * @param {(o: {graveId, kind, name, at}) => Promise<void>|void} opts.onOffer  persist one offering
  * @param {(sid: string) => Promise<object|undefined>} opts.getSession
  * @param {(sid: string, profile: object) => Promise<void>|void} opts.putSession
  */
-export function createRoom({ graves, saved = {}, save, getSession, putSession }) {
+export function createRoom({ graves, saved = {}, onOffer, getSession, putSession }) {
   const graveById = new Map(graves.map((g) => [g.id, g]));
   let memorial = saved.memorial || {};
   let feed = saved.feed || [];
@@ -37,8 +38,6 @@ export function createRoom({ graves, saved = {}, save, getSession, putSession })
   let dirty = false;
   let ticker = null;
 
-  // `changed` lets key-value backends write only the touched grave
-  const persist = (changed) => save({ memorial, feed, changed });
 
   function graveState(id, now = Date.now()) {
     const m = memorial[id];
@@ -106,13 +105,11 @@ export function createRoom({ graves, saved = {}, save, getSession, putSession })
         const m = (memorial[graveId] ||= { events: [], total: { incense: 0, flower: 0, candle: 0 } });
         m.events.push({ kind, at: now });
         m.total[kind] = (m.total[kind] || 0) + 1;
-        const target = graveId === MONUMENT_ID ? "Đài Tổ quốc ghi công" : `liệt sĩ ${graveById.get(graveId).name}`;
-        const entry = { name: p.name, kind, graveId, target, at: now };
+        const entry = { name: p.name, kind, graveId, target: offeringTarget(graveId, graveById.get(graveId)?.name), at: now };
         feed.push(entry);
         if (feed.length > 100) feed.shift();
-        const state = graveState(graveId, now); // also prunes expired events before saving
-        persist(graveId);
-        broadcast({ t: "memorial", state, entry });
+        Promise.resolve(onOffer({ graveId, kind, name: p.name, at: now })).catch((e) => console.error("offer not saved", e));
+        broadcast({ t: "memorial", state: graveState(graveId, now), entry });
         return;
       }
     }
