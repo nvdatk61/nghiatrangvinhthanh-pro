@@ -1,0 +1,6 @@
+node_modules/
+*.log
+e2e-out/
+# grave records and offering state are generated / runtime data; keep them out of git
+data/*.json
+data/*.tmp

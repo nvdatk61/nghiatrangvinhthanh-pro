@@ -1,0 +1,20 @@
+{
+  "name": "vinhthanh-3d",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Local multiplayer 3D memorial for the Vinh Thanh martyrs' cemetery",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "start": "node server/server.mjs",
+    "open": "tools/open-chrome.sh",
+    "import-data": "node tools/import-data.mjs",
+    "test": "node tools/smoke.mjs",
+    "e2e": "node tools/e2e.mjs"
+  },
+  "dependencies": {
+    "three": "^0.170.0"
+  }
+}
